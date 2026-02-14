@@ -30,7 +30,6 @@ class Telegram:
     def __init__(self):
         self.token = os.environ.get('TG_BOT_TOKEN')
         self.chat_id = os.environ.get('TG_CHAT_ID')
-        # 修改点：增加初始化日志，明确告知是否配置成功
         if self.token and self.chat_id:
             self.ok = True
             print(f"✅ Telegram 通知已启用 (Chat ID: {self.chat_id})")
@@ -41,7 +40,6 @@ class Telegram:
     def send(self, msg):
         if not self.ok:
             return
-        # 修改点：移除静默失败，增加错误打印
         try:
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
             payload = {"chat_id": self.chat_id, "text": msg, "parse_mode": "HTML"}
@@ -62,7 +60,6 @@ class Telegram:
         if not os.path.exists(path):
             print(f"⚠️ 无法发送图片，文件不存在: {path}")
             return
-        # 修改点：增加图片发送的错误日志
         try:
             with open(path, 'rb') as f:
                 url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
@@ -109,6 +106,7 @@ class Telegram:
         
         while time.time() < deadline:
             try:
+                # 优化: 使用长轮询 timeout=20，减少空转和 sleep
                 r = requests.get(
                     f"https://api.telegram.org/bot{self.token}/getUpdates",
                     params={"timeout": 20, "offset": offset},
@@ -119,7 +117,12 @@ class Telegram:
                     time.sleep(2)
                     continue
                 
-                for upd in data.get("result", []):
+                result = data.get("result", [])
+                if not result:
+                    # 没有新消息，继续下一次长轮询，无需 sleep
+                    continue
+
+                for upd in result:
                     offset = upd["update_id"] + 1
                     msg = upd.get("message") or {}
                     chat = msg.get("chat") or {}
@@ -136,8 +139,7 @@ class Telegram:
             
             except Exception as e:
                 print(f"⚠️ 监听消息异常: {e}")
-            
-            time.sleep(2)
+                time.sleep(2) # 发生异常时才休眠
         
         return None
 
@@ -250,7 +252,6 @@ class AutoLogin:
             host = parsed.netloc  # 如 "ap-southeast-1.console.claw.cloud"
             
             # 检查是否是区域子域名格式
-            # 格式: {region}.console.claw.cloud
             if host.endswith('.console.claw.cloud'):
                 region = host.replace('.console.claw.cloud', '')
                 if region and region != 'console':  # 排除无效情况
@@ -262,8 +263,6 @@ class AutoLogin:
             
             # 如果是主域名 console.run.claw.cloud，可能还没跳转
             if 'console.run.claw.cloud' in host or 'claw.cloud' in host:
-                # 尝试从路径或其他地方提取区域信息
-                # 有些平台可能在路径中包含区域，如 /region/ap-southeast-1/...
                 path = parsed.path
                 region_match = re.search(r'/(?:region|r)/([a-z]+-[a-z]+-\d+)', path)
                 if region_match:
@@ -358,7 +357,7 @@ class AutoLogin:
         """等待 GitHub Mobile 两步验证批准，并把数字截图提前发到电报"""
         self.log(f"需要两步验证（GitHub Mobile），等待 {TWO_FACTOR_WAIT} 秒...", "WARN")
         
-        # 先截图并立刻发出去（让你看到数字）
+        # 先截图并立刻发出去
         shot = self.shot(page, "两步验证_mobile")
         self.tg.send(f"""⚠️ <b>需要两步验证（GitHub Mobile）</b>
 
@@ -367,31 +366,26 @@ class AutoLogin:
         if shot:
             self.tg.photo(shot, "两步验证页面（数字在图里）")
         
-        # 不要频繁 reload，避免把流程刷回登录页
         for i in range(TWO_FACTOR_WAIT):
             time.sleep(1)
             
             url = page.url
             
-            # 如果离开 two-factor 流程页面，认为通过
             if "github.com/sessions/two-factor/" not in url:
                 self.log("两步验证通过！", "SUCCESS")
                 self.tg.send("✅ <b>两步验证通过</b>")
                 return True
             
-            # 如果被刷回登录页，说明这次流程断了（不要硬等）
             if "github.com/login" in url:
                 self.log("两步验证后回到了登录页，需重新登录", "ERROR")
                 return False
             
-            # 每 10 秒打印一次，并补发一次截图（防止你没看到数字）
             if i % 10 == 0 and i != 0:
                 self.log(f"  等待... ({i}/{TWO_FACTOR_WAIT}秒)")
                 shot = self.shot(page, f"两步验证_{i}s")
                 if shot:
                     self.tg.photo(shot, f"两步验证页面（第{i}秒）")
             
-            # 只在 30 秒、60 秒... 做一次轻刷新（可选，频率很低）
             if i % 30 == 0 and i != 0:
                 try:
                     page.reload(timeout=30000)
@@ -408,30 +402,25 @@ class AutoLogin:
         self.log("需要输入验证码", "WARN")
         shot = self.shot(page, "两步验证_code")
 
-        # 如果是 Security Key (webauthn) 页面，尝试切换到 Authenticator App
+        # 尝试切换到 Authenticator App
         if 'two-factor/webauthn' in page.url:
             self.log("检测到 Security Key 页面，尝试切换...", "INFO")
             try:
-                # 点击 "More options"
                 more_options_button = page.locator('button:has-text("More options")').first
                 if more_options_button.is_visible(timeout=3000):
                     more_options_button.click()
-                    self.log("已点击 'More options'", "SUCCESS")
-                    time.sleep(1) # 等待菜单出现
-                    self.shot(page, "点击more_options后")
-
-                    # 点击 "Authenticator app"
+                    time.sleep(1)
+                    
                     auth_app_button = page.locator('button:has-text("Authenticator app")').first
                     if auth_app_button.is_visible(timeout=2000):
                         auth_app_button.click()
                         self.log("已选择 'Authenticator app'", "SUCCESS")
-                        time.sleep(2)
                         page.wait_for_load_state('networkidle', timeout=15000)
-                        shot = self.shot(page, "切换到验证码输入页") # 更新截图
+                        shot = self.shot(page, "切换到验证码输入页")
             except Exception as e:
                 self.log(f"切换验证方式时出错: {e}", "WARN")
 
-        # (保留) 先尝试点击"Use an authentication app"或类似按钮（如果在 mobile 页面）
+        # 尝试点击 "Use an authentication app"
         try:
             more_options = [
                 'a:has-text("Use an authentication app")',
@@ -441,21 +430,15 @@ class AutoLogin:
                 '[href*="two-factor/app"]'
             ]
             for sel in more_options:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=2000):
-                        el.click()
-                        time.sleep(2)
-                        page.wait_for_load_state('networkidle', timeout=15000)
-                        self.log("已切换到验证码输入页面", "SUCCESS")
-                        shot = self.shot(page, "两步验证_code_切换后")
-                        break
-                except:
-                    pass
+                if page.locator(sel).first.is_visible(timeout=2000):
+                    page.locator(sel).first.click()
+                    page.wait_for_load_state('networkidle', timeout=15000)
+                    self.log("已切换到验证码输入页面", "SUCCESS")
+                    shot = self.shot(page, "两步验证_code_切换后")
+                    break
         except:
             pass
 
-        # 发送提示并等待验证码
         self.tg.send(f"""🔐 <b>需要验证码登录</b>
 
 用户{self.username}正在登录，请在 Telegram 里发送：
@@ -473,11 +456,9 @@ class AutoLogin:
             self.tg.send("❌ <b>等待验证码超时</b>")
             return False
 
-        # 不打印验证码明文，只提示收到
         self.log("收到验证码，正在填入...", "SUCCESS")
         self.tg.send("✅ 收到验证码，正在填入...")
 
-        # 常见 OTP 输入框 selector（优先级排序）
         selectors = [
             'input[autocomplete="one-time-code"]',
             'input[name="app_otp"]',
@@ -493,9 +474,8 @@ class AutoLogin:
                 if el.is_visible(timeout=2000):
                     el.fill(code)
                     self.log(f"已填入验证码", "SUCCESS")
-                    time.sleep(1)
+                    time.sleep(0.5)
 
-                    # 优先点击 Verify 按钮，不行再 Enter
                     submitted = False
                     verify_btns = [
                         'button:has-text("Verify")',
@@ -503,25 +483,25 @@ class AutoLogin:
                         'input[type="submit"]'
                     ]
                     for btn_sel in verify_btns:
-                        try:
-                            btn = page.locator(btn_sel).first
-                            if btn.is_visible(timeout=1000):
-                                btn.click()
-                                submitted = True
-                                self.log("已点击 Verify 按钮", "SUCCESS")
-                                break
-                        except:
-                            pass
+                        btn = page.locator(btn_sel).first
+                        if btn.is_visible(timeout=1000):
+                            btn.click()
+                            submitted = True
+                            self.log("已点击 Verify 按钮", "SUCCESS")
+                            break
 
                     if not submitted:
                         page.keyboard.press("Enter")
                         self.log("已按 Enter 提交", "SUCCESS")
 
-                    time.sleep(3)
-                    page.wait_for_load_state('networkidle', timeout=30000)
+                    # 优化: 移除硬等待，使用智能等待
+                    try:
+                        page.wait_for_load_state('networkidle', timeout=30000)
+                    except:
+                        pass
+                    
                     self.shot(page, "验证码提交后")
 
-                    # 检查是否通过
                     if "github.com/sessions/two-factor/" not in page.url:
                         self.log("验证码验证通过！", "SUCCESS")
                         self.tg.send("✅ <b>验证码验证通过</b>")
@@ -552,13 +532,25 @@ class AutoLogin:
         
         self.shot(page, "github_已填写")
         
+        # 优化: 增强选择器精度，移除硬等待
         try:
-            page.locator('input[type="submit"], button[type="submit"]').first.click()
+            # 优先尝试 commit 按钮，然后是通用的 submit
+            btn = page.locator('input[name="commit"], button:has-text("Sign in"), input[type="submit"], button[type="submit"]').first
+            if btn.is_visible(timeout=3000):
+                btn.click()
+                self.log("点击了登录按钮", "SUCCESS")
+            else:
+                page.keyboard.press("Enter")
+                self.log("按下了 Enter 键", "SUCCESS")
+        except:
+            page.keyboard.press("Enter")
+        
+        # 使用 wait_for_load_state 代替 sleep
+        try:
+            page.wait_for_load_state('networkidle', timeout=30000)
         except:
             pass
         
-        time.sleep(3)
-        page.wait_for_load_state('networkidle', timeout=30000)
         self.shot(page, "github_登录后")
         
         url = page.url
@@ -568,7 +560,6 @@ class AutoLogin:
         if 'verified-device' in url or 'device-verification' in url:
             if not self.wait_device(page):
                 return False
-            time.sleep(2)
             page.wait_for_load_state('networkidle', timeout=30000)
             self.shot(page, "验证后")
         
@@ -577,29 +568,22 @@ class AutoLogin:
             self.log("需要两步验证！", "WARN")
             self.shot(page, "两步验证")
             
-            # GitHub Mobile：等待你在手机上批准
             if 'two-factor/mobile' in page.url:
                 if not self.wait_two_factor_mobile(page):
                     return False
-                # 通过后等页面稳定
                 try:
                     page.wait_for_load_state('networkidle', timeout=30000)
-                    time.sleep(2)
                 except:
                     pass
-            
             else:
-                # 其它两步验证方式（TOTP/恢复码等），尝试通过 Telegram 输入验证码
                 if not self.handle_2fa_code_input(page):
                     return False
-                # 通过后等页面稳定
                 try:
                     page.wait_for_load_state('networkidle', timeout=30000)
-                    time.sleep(2)
                 except:
                     pass
         
-        # 错误
+        # 错误检查
         try:
             err = page.locator('.flash-error').first
             if err.is_visible(timeout=2000):
@@ -616,8 +600,11 @@ class AutoLogin:
             self.log("处理 OAuth...", "STEP")
             self.shot(page, "oauth")
             self.click(page, ['button[name="authorize"]', 'button:has-text("Authorize")'], "授权")
-            time.sleep(3)
-            page.wait_for_load_state('networkidle', timeout=30000)
+            # 优化: 移除硬等待
+            try:
+                page.wait_for_load_state('networkidle', timeout=30000)
+            except:
+                pass
     
     def wait_redirect(self, page, wait=60):
         """等待重定向并检测区域"""
@@ -628,10 +615,7 @@ class AutoLogin:
             # 检查是否已跳转到 claw.cloud
             if 'claw.cloud' in url and 'signin' not in url.lower():
                 self.log("重定向成功！", "SUCCESS")
-                
-                # 检测并记录区域
                 self.detect_region(url)
-                
                 return True
             
             if 'github.com/login/oauth/authorize' in url:
@@ -648,7 +632,6 @@ class AutoLogin:
         """保活 - 使用检测到的区域 URL"""
         self.log("保活...", "STEP")
         
-        # 使用检测到的区域 URL，如果没有则使用默认
         base_url = self.get_base_url()
         self.log(f"使用区域 URL: {base_url}", "INFO")
         
@@ -657,7 +640,6 @@ class AutoLogin:
             (f"{base_url}/apps", "应用"),
         ]
         
-        # 如果检测到了区域，可以额外访问一些区域特定页面
         if self.detected_region:
             self.log(f"当前区域: {self.detected_region}", "INFO")
         
@@ -667,12 +649,11 @@ class AutoLogin:
                 page.wait_for_load_state('networkidle', timeout=15000)
                 self.log(f"已访问: {name} ({url})", "SUCCESS")
                 
-                # 再次检测区域（以防中途跳转）
                 current_url = page.url
                 if 'claw.cloud' in current_url:
                     self.detect_region(current_url)
                 
-                time.sleep(2)
+                time.sleep(1) # 短暂间隔，避免请求过快
             except Exception as e:
                 self.log(f"访问 {name} 失败: {e}", "WARN")
         
@@ -680,7 +661,6 @@ class AutoLogin:
     
     def notify(self, ok, err=""):
         if not self.tg.ok:
-            # 即使没配置 Telegram，也在日志打印结果
             print("⚠️ Telegram 未配置，跳过发送通知")
             return
         
@@ -704,8 +684,6 @@ class AutoLogin:
                 for s in self.shots[-3:]:
                     self.tg.photo(s, s)
             else:
-                # for s in self.shots[-3:]:
-                #     self.tg.photo(s, s)
                 self.tg.photo(self.shots[-1], "完成")
     
     def run(self):
@@ -747,15 +725,9 @@ class AutoLogin:
                 self.log("步骤1: 打开 ClawCloud 登录页", "STEP")
                 page.goto(SIGNIN_URL, timeout=60000)
                 page.wait_for_load_state('networkidle', timeout=60000)
-                time.sleep(2)
                 self.shot(page, "clawcloud")
                 
-                # 检查当前 URL，可能已经自动跳转到区域
-                current_url = page.url
-                self.log(f"当前 URL: {current_url}")
-  
-            
-               # 2. 点击 GitHub
+                # 2. 点击 GitHub
                 self.log("步骤2: 点击 GitHub", "STEP")
                 if not self.click(page, [
                     'button:has-text("GitHub")',
@@ -766,7 +738,7 @@ class AutoLogin:
                     self.notify(False, "找不到 GitHub 按钮")
                     sys.exit(1)
                 
-                time.sleep(3)
+                # 优化: 移除硬等待，Playwright click 会自动处理，这里加个 load_state 兜底
                 page.wait_for_load_state('networkidle', timeout=120000)
                 self.shot(page, "点击后")
                 url = page.url
@@ -774,18 +746,14 @@ class AutoLogin:
 
                 if 'signin' not in url.lower() and 'claw.cloud' in url and  'github.com' not in url:
                     self.log("已登录！", "SUCCESS")
-                    # 检测区域
                     self.detect_region(url)
                     self.keepalive(page)
-                    # 提取并保存新 Cookie
                     new = self.get_session(context)
                     if new:
                         self.save_cookie(new)
                     self.notify(True)
                     print("\n✅ 成功！\n")
                     return
-                
-
                 
                 # 3. GitHub 登录
                 self.log("步骤3: GitHub 认证", "STEP")
@@ -799,7 +767,7 @@ class AutoLogin:
                     self.log("Cookie 有效", "SUCCESS")
                     self.oauth(page)
                 
-                # 4. 等待重定向（会自动检测区域）
+                # 4. 等待重定向
                 self.log("步骤4: 等待重定向", "STEP")
                 if not self.wait_redirect(page):
                     self.shot(page, "重定向失败")
@@ -815,14 +783,13 @@ class AutoLogin:
                     self.notify(False, "验证失败")
                     sys.exit(1)
                 
-                # 再次确认区域检测
                 if not self.detected_region:
                     self.detect_region(current_url)
                 
-                # 6. 保活（使用检测到的区域 URL）
+                # 6. 保活
                 self.keepalive(page)
                 
-                # 7. 提取并保存新 Cookie
+                # 7. 更新 Cookie
                 self.log("步骤6: 更新 Cookie", "STEP")
                 new = self.get_session(context)
                 if new:
